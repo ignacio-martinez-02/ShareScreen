@@ -19,9 +19,13 @@ const rtcConfig = {
         { urls: "stun:stun4.l.google.com:19302" },
         { urls: "stun:stun.cloudflare.com:3478" },
         { urls: "stun:global.stun.twilio.com:3478" },
-        // Servidores TURN Relay (OpenRelay + ExpressTURN)
+        // Servidores TURN Relay (Metered Relay + OpenRelay + ExpressTURN)
         {
             urls: [
+                "turn:relay.metered.ca:80",
+                "turn:relay.metered.ca:443",
+                "turn:relay.metered.ca:443?transport=tcp",
+                "turns:relay.metered.ca:443?transport=tcp",
                 "turn:openrelay.metered.ca:80",
                 "turn:openrelay.metered.ca:443",
                 "turn:openrelay.metered.ca:443?transport=tcp",
@@ -39,7 +43,9 @@ const rtcConfig = {
             credential: "free"
         }
     ],
-    iceCandidatePoolSize: 10
+    iceCandidatePoolSize: 10,
+    bundlePolicy: "max-bundle",
+    rtcpMuxPolicy: "require"
 };
 
 // --- INICIALIZACIÓN AL CARGAR LA PÁGINA ---
@@ -384,8 +390,9 @@ function initPeerConnection() {
                 const overlay = document.getElementById("receiverOverlay");
                 if (overlay) overlay.classList.add("hidden");
             } else if (peerConnection.connectionState === "failed") {
-                updateReceiverStatus("Falló conexión P2P. Reintentando por servidor TURN...");
-                try { peerConnection.restartIce(); } catch (e) {}
+                console.warn("[WebRTC] ConnectionState falló. Reintentando por servidor TURN...");
+                updateReceiverStatus("Reintentando por servidor Relay TURN...");
+                triggerIceRestart();
             }
         }
     };
@@ -443,6 +450,22 @@ function initPeerConnection() {
             setupRemoteControlListeners();
             startMetricsLoop();
         };
+    }
+}
+
+async function triggerIceRestart() {
+    if (!peerConnection) return;
+    try {
+        console.log("[WebRTC] Ejecutando ICE Restart...");
+        if (userRole === "sender") {
+            const offer = await peerConnection.createOffer({ iceRestart: true });
+            await peerConnection.setLocalDescription(offer);
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(jsonMsg({ type: "offer", offer: offer }));
+            }
+        }
+    } catch (e) {
+        console.error("[WebRTC] Error durante triggerIceRestart:", e);
     }
 }
 
