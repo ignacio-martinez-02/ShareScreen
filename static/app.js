@@ -8,7 +8,7 @@ let statsInterval = null;
 let heartbeatInterval = null;
 let pendingIceCandidates = [];
 
-// Configuración ICE Server (Google STUN + OpenRelay & Metered TURN)
+// Configuración ICE Server (Google STUN + Cloudflare + OpenRelay & Metered TURN)
 const rtcConfig = {
     iceServers: [
         { urls: "stun:stun.l.google.com:19302" },
@@ -16,24 +16,21 @@ const rtcConfig = {
         { urls: "stun:stun2.l.google.com:19302" },
         { urls: "stun:stun3.l.google.com:19302" },
         { urls: "stun:stun4.l.google.com:19302" },
+        { urls: "stun:stun.cloudflare.com:3478" },
         { urls: "stun:global.stun.twilio.com:3478" },
         // Servidores TURN (Relay) indispensables para atravesar routers distintos, Ethernet corp, CGNAT
         {
-            urls: "turn:openrelay.metered.ca:80",
-            username: "openrelayproject",
-            credential: "openrelayproject"
-        },
-        {
-            urls: "turn:openrelay.metered.ca:443",
-            username: "openrelayproject",
-            credential: "openrelayproject"
-        },
-        {
-            urls: "turns:openrelay.metered.ca:443?transport=tcp",
+            urls: [
+                "turn:openrelay.metered.ca:80",
+                "turn:openrelay.metered.ca:443",
+                "turn:openrelay.metered.ca:443?transport=tcp",
+                "turns:openrelay.metered.ca:443?transport=tcp"
+            ],
             username: "openrelayproject",
             credential: "openrelayproject"
         }
-    ]
+    ],
+    iceCandidatePoolSize: 10
 };
 
 // --- INICIALIZACIÓN AL CARGAR LA PÁGINA ---
@@ -239,7 +236,10 @@ async function handleSignalingMessage(data) {
                 initPeerConnection();
                 await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
                 await processPendingIceCandidates();
-                const answer = await peerConnection.createAnswer();
+                const answer = await peerConnection.createAnswer({
+                    offerToReceiveVideo: true,
+                    offerToReceiveAudio: true
+                });
                 await peerConnection.setLocalDescription(answer);
                 socket.send(jsonMsg({ type: "answer", answer: answer }));
             }
@@ -250,6 +250,7 @@ async function handleSignalingMessage(data) {
                 console.log("[WebRTC] Respuesta del receptor recibida. Conexión establecida.");
                 await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
                 await processPendingIceCandidates();
+                applyBitrateOptimization();
                 document.getElementById("peerStateSender").innerText = "Conectado";
                 document.getElementById("peersCountSender").innerText = "1";
             }
@@ -276,7 +277,6 @@ async function handleSignalingMessage(data) {
                 document.getElementById("peerStateSender").innerText = "Esperando receptor...";
                 document.getElementById("peersCountSender").innerText = "0";
             } else if (userRole === "receiver") {
-                // Verificar si la conexión WebRTC sigue activa antes de mostrar desconexión
                 if (!peerConnection || peerConnection.connectionState !== "connected") {
                     document.getElementById("receiverOverlay").classList.remove("hidden");
                     updateReceiverStatus("El emisor se ha desconectado de la sala.");
@@ -295,6 +295,25 @@ async function processPendingIceCandidates() {
             } catch (e) {
                 console.error("[WebRTC] Error añadiendo candidato pendiente:", e);
             }
+        }
+    }
+}
+
+// Control dinámico de tasa de bits (Bitrate) para no saturar conexiones domésticas de subida
+function applyBitrateOptimization() {
+    if (!peerConnection || userRole !== "sender") return;
+    const senders = peerConnection.getSenders();
+    const videoSender = senders.find(s => s.track && s.track.kind === "video");
+    if (videoSender) {
+        try {
+            const parameters = videoSender.getParameters();
+            if (!parameters.encodings) parameters.encodings = [{}];
+            // Limitar a 2.5 Mbps para fluidez garantizada por Internet/Wi-Fi
+            parameters.encodings[0].maxBitrate = 2500000;
+            videoSender.setParameters(parameters).catch(e => console.warn("[Bitrate] Set parameter error:", e));
+            console.log("[Bitrate] Optimización aplicada: máximo 2.5 Mbps.");
+        } catch (err) {
+            console.warn("[Bitrate] Error aplicando optimización de tasa de bits:", err);
         }
     }
 }
