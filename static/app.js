@@ -19,7 +19,7 @@ const rtcConfig = {
         { urls: "stun:stun4.l.google.com:19302" },
         { urls: "stun:stun.cloudflare.com:3478" },
         { urls: "stun:global.stun.twilio.com:3478" },
-        // Servidores TURN (Relay) para atravesar routers distintos, Ethernet corp y CGNAT
+        // Servidores TURN (Relay) indispensables para atravesar routers distintos, Ethernet corp y CGNAT
         {
             urls: [
                 "turn:openrelay.metered.ca:80",
@@ -207,24 +207,32 @@ function jsonMsg(obj) {
     return JSON.stringify(obj);
 }
 
-// --- PROCESAMIENTO DE MENSAJES DE SEÑALIZACIÓN WEBRTC ---
+// --- PROCESAMIENTO DE MENSAJES DE SEÑALIZACIÓN WEBRTC (CON CONTROL DE ESTADOS) ---
 async function handleSignalingMessage(data) {
     switch (data.type) {
         case "sender-ready":
             console.log("[WebRTC] El emisor ha iniciado compartición de pantalla!");
             if (userRole === "receiver") {
-                updateReceiverStatus("El emisor inició transmisión. Solicitando conexión...");
-                if (socket && socket.readyState === WebSocket.OPEN) {
-                    socket.send(jsonMsg({ type: "receiver-ready" }));
+                // Solo enviar receiver-ready si no tenemos ya una conexión WebRTC activa
+                if (!peerConnection || peerConnection.connectionState === "failed" || peerConnection.connectionState === "disconnected") {
+                    updateReceiverStatus("El emisor inició transmisión. Solicitando conexión...");
+                    if (socket && socket.readyState === WebSocket.OPEN) {
+                        socket.send(jsonMsg({ type: "receiver-ready" }));
+                    }
                 }
             }
             break;
 
         case "receiver-ready":
-            console.log("[WebRTC] Receptor listo en la sala. Creando oferta WebRTC...");
+            console.log("[WebRTC] Receptor listo en la sala. Evaluando oferta WebRTC...");
             if (userRole === "sender" && localStream) {
+                // Si ya estamos conectados o en negociación activa, evitar reiniciar innecesariamente
+                if (peerConnection && (peerConnection.connectionState === "connected" || peerConnection.signalingState === "have-local-offer")) {
+                    console.log("[WebRTC] Conexión ya en proceso o conectada. Omitiendo duplicado de oferta.");
+                    return;
+                }
                 if (peerConnection) {
-                    peerConnection.close();
+                    try { peerConnection.close(); } catch(e){}
                     peerConnection = null;
                 }
                 initPeerConnection();
@@ -236,39 +244,53 @@ async function handleSignalingMessage(data) {
             if (userRole === "receiver") {
                 console.log("[WebRTC] Oferta recibida. Configurando descripción remota...");
                 updateReceiverStatus("Oferta de video recibida. Negociando conexión WebRTC...");
-                if (peerConnection) {
-                    peerConnection.close();
+                if (peerConnection && peerConnection.signalingState !== "stable") {
+                    console.log("[WebRTC] Reiniciando peerConnection previo no estable...");
+                    try { peerConnection.close(); } catch(e){}
                     peerConnection = null;
                 }
                 initPeerConnection();
-                await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
-                await processPendingIceCandidates();
-                const answer = await peerConnection.createAnswer({
-                    offerToReceiveVideo: true,
-                    offerToReceiveAudio: true
-                });
-                await peerConnection.setLocalDescription(answer);
-                if (socket && socket.readyState === WebSocket.OPEN) {
-                    socket.send(jsonMsg({ type: "answer", answer: answer }));
+                try {
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+                    await processPendingIceCandidates();
+                    const answer = await peerConnection.createAnswer({
+                        offerToReceiveVideo: true,
+                        offerToReceiveAudio: true
+                    });
+                    await peerConnection.setLocalDescription(answer);
+                    if (socket && socket.readyState === WebSocket.OPEN) {
+                        socket.send(jsonMsg({ type: "answer", answer: answer }));
+                    }
+                } catch (errOffer) {
+                    console.error("[WebRTC] Error procesando oferta:", errOffer);
                 }
             }
             break;
 
         case "answer":
             if (userRole === "sender" && peerConnection) {
-                console.log("[WebRTC] Respuesta del receptor recibida. Conexión establecida.");
-                await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
-                await processPendingIceCandidates();
-                applyBitrateOptimization();
-                document.getElementById("peerStateSender").innerText = "Conectado";
-                document.getElementById("peersCountSender").innerText = "1";
+                // Solo aplicar la respuesta si estamos esperando una respuesta local (have-local-offer)
+                if (peerConnection.signalingState === "have-local-offer") {
+                    console.log("[WebRTC] Respuesta del receptor recibida. Conexión establecida.");
+                    try {
+                        await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+                        await processPendingIceCandidates();
+                        applyBitrateOptimization();
+                        document.getElementById("peerStateSender").innerText = "Conectado";
+                        document.getElementById("peersCountSender").innerText = "1";
+                    } catch (errAnswer) {
+                        console.error("[WebRTC] Error estableciendo respuesta remota:", errAnswer);
+                    }
+                } else {
+                    console.warn("[WebRTC] Omitiendo respuesta remota duplicada en estado:", peerConnection.signalingState);
+                }
             }
             break;
 
         case "ice-candidate":
             if (data.candidate) {
                 const candidate = new RTCIceCandidate(data.candidate);
-                if (peerConnection && peerConnection.remoteDescription) {
+                if (peerConnection && peerConnection.remoteDescription && peerConnection.remoteDescription.type) {
                     try {
                         await peerConnection.addIceCandidate(candidate);
                     } catch (e) {
@@ -296,7 +318,7 @@ async function handleSignalingMessage(data) {
 }
 
 async function processPendingIceCandidates() {
-    if (peerConnection && peerConnection.remoteDescription) {
+    if (peerConnection && peerConnection.remoteDescription && peerConnection.remoteDescription.type) {
         while (pendingIceCandidates.length > 0) {
             const candidate = pendingIceCandidates.shift();
             try {
@@ -388,7 +410,6 @@ function initPeerConnection() {
                 remoteVideo.srcObject = stream;
             }
 
-            // Reproducir únicamente si la reproducción actual no ha iniciado
             if (remoteVideo.paused) {
                 remoteVideo.play().catch(e => console.warn("[WebRTC] Play err:", e));
             }
@@ -402,13 +423,17 @@ function initPeerConnection() {
 
 async function createAndSendOffer() {
     if (!peerConnection) return;
-    const offer = await peerConnection.createOffer({
-        offerToReceiveVideo: true,
-        offerToReceiveAudio: true
-    });
-    await peerConnection.setLocalDescription(offer);
-    if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(jsonMsg({ type: "offer", offer: offer }));
+    try {
+        const offer = await peerConnection.createOffer({
+            offerToReceiveVideo: true,
+            offerToReceiveAudio: true
+        });
+        await peerConnection.setLocalDescription(offer);
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(jsonMsg({ type: "offer", offer: offer }));
+        }
+    } catch (err) {
+        console.error("[WebRTC] Error creando u ofreciendo oferta:", err);
     }
 }
 
@@ -475,7 +500,7 @@ async function startScreenShare() {
             socket.send(jsonMsg({ type: "sender-ready" }));
 
             if (peerConnection) {
-                peerConnection.close();
+                try { peerConnection.close(); } catch(e){}
                 peerConnection = null;
             }
             initPeerConnection();
