@@ -22,14 +22,13 @@ const rtcConfig = {
         // Servidores TURN Relay (Metered Relay + OpenRelay + ExpressTURN)
         {
             urls: [
-                "turn:relay.metered.ca:80",
-                "turn:relay.metered.ca:443",
-                "turn:relay.metered.ca:443?transport=tcp",
-                "turns:relay.metered.ca:443?transport=tcp",
                 "turn:openrelay.metered.ca:80",
                 "turn:openrelay.metered.ca:443",
                 "turn:openrelay.metered.ca:443?transport=tcp",
-                "turns:openrelay.metered.ca:443?transport=tcp"
+                "turns:openrelay.metered.ca:443?transport=tcp",
+                "turn:relay.metered.ca:80",
+                "turn:relay.metered.ca:443",
+                "turns:relay.metered.ca:443?transport=tcp"
             ],
             username: "openrelayproject",
             credential: "openrelayproject"
@@ -37,7 +36,9 @@ const rtcConfig = {
         {
             urls: [
                 "turn:relay1.expressturn.com:3478",
-                "turn:relay2.expressturn.com:3478"
+                "turn:relay2.expressturn.com:3478",
+                "turn:relay1.expressturn.com:443",
+                "turn:relay2.expressturn.com:443"
             ],
             username: "000000000216606",
             credential: "free"
@@ -381,6 +382,10 @@ function initPeerConnection() {
         const stateSender = document.getElementById("peerStateSender");
         if (stateSender && userRole === "sender") {
             stateSender.innerText = peerConnection.connectionState;
+            if (peerConnection.connectionState === "failed") {
+                console.warn("[WebRTC] ConnectionState falló en el emisor. Reejecutando ICE Restart...");
+                triggerIceRestart();
+            }
         }
         if (userRole === "receiver") {
             if (peerConnection.connectionState === "connecting") {
@@ -390,9 +395,11 @@ function initPeerConnection() {
                 const overlay = document.getElementById("receiverOverlay");
                 if (overlay) overlay.classList.add("hidden");
             } else if (peerConnection.connectionState === "failed") {
-                console.warn("[WebRTC] ConnectionState falló. Reintentando por servidor TURN...");
+                console.warn("[WebRTC] ConnectionState falló en el receptor. Solicitando re-negociación...");
                 updateReceiverStatus("Reintentando por servidor Relay TURN...");
-                triggerIceRestart();
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    socket.send(jsonMsg({ type: "receiver-ready" }));
+                }
             }
         }
     };
@@ -454,15 +461,13 @@ function initPeerConnection() {
 }
 
 async function triggerIceRestart() {
-    if (!peerConnection) return;
+    if (!peerConnection || userRole !== "sender") return;
     try {
-        console.log("[WebRTC] Ejecutando ICE Restart...");
-        if (userRole === "sender") {
-            const offer = await peerConnection.createOffer({ iceRestart: true });
-            await peerConnection.setLocalDescription(offer);
-            if (socket && socket.readyState === WebSocket.OPEN) {
-                socket.send(jsonMsg({ type: "offer", offer: offer }));
-            }
+        console.log("[WebRTC] Ejecutando ICE Restart en el emisor...");
+        const offer = await peerConnection.createOffer({ iceRestart: true });
+        await peerConnection.setLocalDescription(offer);
+        if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(jsonMsg({ type: "offer", offer: offer }));
         }
     } catch (e) {
         console.error("[WebRTC] Error durante triggerIceRestart:", e);
