@@ -5,18 +5,21 @@ let localStream = null;
 let currentRoomCode = null;
 let userRole = null; // 'sender' | 'receiver'
 let statsInterval = null;
-let lastFrameTime = performance.now();
-let frameCount = 0;
+let pendingIceCandidates = [];
 
-// Configuración ICE Server (Google STUN gratuito para red local/internet)
+// Configuración ICE Server (Google & Twilio STUN gratuitos)
 const rtcConfig = {
     iceServers: [
         { urls: "stun:stun.l.google.com:19302" },
-        { urls: "stun:stun1.l.google.com:19302" }
+        { urls: "stun:stun1.l.google.com:19302" },
+        { urls: "stun:stun2.l.google.com:19302" },
+        { urls: "stun:stun3.l.google.com:19302" },
+        { urls: "stun:stun4.l.google.com:19302" },
+        { urls: "stun:global.stun.twilio.com:3478" }
     ]
 };
 
-// --- INICIALIZACIÓN AL CABAR DE CARGAR LA PÁGINA ---
+// --- INICIALIZACIÓN AL CARGAR LA PÁGINA ---
 document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("serverIpText").innerText = window.location.hostname;
 });
@@ -59,6 +62,7 @@ function resetToLobby() {
         statsInterval = null;
     }
 
+    pendingIceCandidates = [];
     userRole = null;
     currentRoomCode = null;
     document.getElementById("localVideo").srcObject = null;
@@ -121,7 +125,6 @@ function connectWebSocket(roomCode) {
         updateConnectionStatus("online", "En Sala (" + roomCode + ")");
         
         if (userRole === "receiver") {
-            // Notificar al emisor que hay un receptor listo
             socket.send(jsonMsg({ type: "receiver-ready" }));
         }
     };
@@ -153,8 +156,12 @@ function jsonMsg(obj) {
 async function handleSignalingMessage(data) {
     switch (data.type) {
         case "receiver-ready":
-            console.log("[WebRTC] Receptor listo. Creando conexión...");
+            console.log("[WebRTC] Receptor listo. Reiniciando negociación de pares...");
             if (userRole === "sender" && localStream) {
+                if (peerConnection) {
+                    peerConnection.close();
+                    peerConnection = null;
+                }
                 initPeerConnection();
                 createAndSendOffer();
             }
@@ -162,9 +169,14 @@ async function handleSignalingMessage(data) {
 
         case "offer":
             if (userRole === "receiver") {
-                console.log("[WebRTC] Oferta recibida. Respondiendo...");
+                console.log("[WebRTC] Oferta recibida. Creando respuesta...");
+                if (peerConnection) {
+                    peerConnection.close();
+                    peerConnection = null;
+                }
                 initPeerConnection();
                 await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+                await processPendingIceCandidates();
                 const answer = await peerConnection.createAnswer();
                 await peerConnection.setLocalDescription(answer);
                 socket.send(jsonMsg({ type: "answer", answer: answer }));
@@ -173,19 +185,25 @@ async function handleSignalingMessage(data) {
 
         case "answer":
             if (userRole === "sender" && peerConnection) {
-                console.log("[WebRTC] Respuesta recibida. Conexión establecida.");
+                console.log("[WebRTC] Respuesta recibida. Estableciendo conexión...");
                 await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+                await processPendingIceCandidates();
                 document.getElementById("peerStateSender").innerText = "Conectado";
                 document.getElementById("peersCountSender").innerText = "1";
             }
             break;
 
         case "ice-candidate":
-            if (peerConnection && data.candidate) {
-                try {
-                    await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
-                } catch (e) {
-                    console.error("[WebRTC] Error al añadir ICE Candidate:", e);
+            if (data.candidate) {
+                const candidate = new RTCIceCandidate(data.candidate);
+                if (peerConnection && peerConnection.remoteDescription) {
+                    try {
+                        await peerConnection.addIceCandidate(candidate);
+                    } catch (e) {
+                        console.error("[WebRTC] Error añadiendo ICE Candidate:", e);
+                    }
+                } else {
+                    pendingIceCandidates.push(candidate);
                 }
             }
             break;
@@ -200,6 +218,19 @@ async function handleSignalingMessage(data) {
                 document.getElementById("receiverStatusText").innerText = "El emisor se ha desconectado.";
             }
             break;
+    }
+}
+
+async function processPendingIceCandidates() {
+    if (peerConnection && peerConnection.remoteDescription) {
+        while (pendingIceCandidates.length > 0) {
+            const candidate = pendingIceCandidates.shift();
+            try {
+                await peerConnection.addIceCandidate(candidate);
+            } catch (e) {
+                console.error("[WebRTC] Error añadiendo candidato pendiente:", e);
+            }
+        }
     }
 }
 
@@ -229,10 +260,11 @@ function initPeerConnection() {
     // Si somos receptor, recibimos el stream remoto
     if (userRole === "receiver") {
         peerConnection.ontrack = (event) => {
-            console.log("[WebRTC] Recibiendo stream remoto!");
+            console.log("[WebRTC] Track remoto recibido!", event.streams);
             const remoteVideo = document.getElementById("remoteVideo");
-            if (remoteVideo.srcObject !== event.streams[0]) {
+            if (event.streams && event.streams[0]) {
                 remoteVideo.srcObject = event.streams[0];
+                remoteVideo.play().catch(e => console.warn("[WebRTC] Reproducción bloqueada por política del navegador:", e));
                 document.getElementById("receiverOverlay").classList.add("hidden");
                 setupRemoteControlListeners();
                 startMetricsLoop();
@@ -243,7 +275,10 @@ function initPeerConnection() {
 
 async function createAndSendOffer() {
     if (!peerConnection) return;
-    const offer = await peerConnection.createOffer();
+    const offer = await peerConnection.createOffer({
+        offerToReceiveVideo: true,
+        offerToReceiveAudio: true
+    });
     await peerConnection.setLocalDescription(offer);
     socket.send(jsonMsg({ type: "offer", offer: offer }));
 }
@@ -293,8 +328,12 @@ async function startScreenShare() {
             stopScreenShare();
         };
 
-        // Si ya hay un receptor esperando en la sala, iniciar peer connection
+        // Re-crear conexión WebRTC limpia con los nuevos tracks
         if (socket && socket.readyState === WebSocket.OPEN) {
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
             initPeerConnection();
             createAndSendOffer();
         }
@@ -340,7 +379,7 @@ function startMetricsLoop() {
     }, 1000);
 }
 
-// --- HERRAMIENTAS DEL RECEPTOR (PANTALLA COMPLETA, AUDIO, SCREENSHOT) ---
+// --- HERRAMIENTAS DEL RECEPTOR ---
 function toggleRemoteAudio() {
     const video = document.getElementById("remoteVideo");
     video.muted = !video.muted;
@@ -372,7 +411,7 @@ function takeScreenshot() {
     a.click();
 }
 
-// --- ESCUCHADORES DE CONTROL REMOTO (ENVIAR MOUSE Y TECLADO AL EMISOR) ---
+// --- ESCUCHADORES DE CONTROL REMOTO ---
 function setupRemoteControlListeners() {
     const container = document.getElementById("viewerContainer");
     const video = document.getElementById("remoteVideo");
@@ -395,7 +434,6 @@ function setupRemoteControlListeners() {
     });
 
     container.addEventListener("mousemove", (e) => {
-        // Enviar solo si hay botón presionado o para mover puntero
         if (userRole !== "receiver" || !socket) return;
         const rect = video.getBoundingClientRect();
         const x = (e.clientX - rect.left) / rect.width;
