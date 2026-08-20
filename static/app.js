@@ -7,7 +7,7 @@ let userRole = null; // 'sender' | 'receiver'
 let statsInterval = null;
 let pendingIceCandidates = [];
 
-// Configuración ICE Server (Google & Twilio STUN gratuitos)
+// Configuración ICE Server (Google STUN + OpenRelay TURN para conectar distintas redes / CGNAT)
 const rtcConfig = {
     iceServers: [
         { urls: "stun:stun.l.google.com:19302" },
@@ -15,9 +15,26 @@ const rtcConfig = {
         { urls: "stun:stun2.l.google.com:19302" },
         { urls: "stun:stun3.l.google.com:19302" },
         { urls: "stun:stun4.l.google.com:19302" },
-        { urls: "stun:global.stun.twilio.com:3478" }
+        { urls: "stun:global.stun.twilio.com:3478" },
+        // Servidores TURN (Relay) indispensables para atravesar routers distintos, CGNAT y redes Wi-Fi diferentes
+        {
+            urls: "turn:openrelay.metered.ca:80",
+            username: "openrelayproject",
+            credential: "openrelayproject"
+        },
+        {
+            urls: "turn:openrelay.metered.ca:443",
+            username: "openrelayproject",
+            credential: "openrelayproject"
+        },
+        {
+            urls: "turns:openrelay.metered.ca:443?transport=tcp",
+            username: "openrelayproject",
+            credential: "openrelayproject"
+        }
     ]
 };
+
 
 // --- INICIALIZACIÓN AL CARGAR LA PÁGINA ---
 document.addEventListener("DOMContentLoaded", () => {
@@ -240,6 +257,26 @@ function initPeerConnection() {
 
     peerConnection = new RTCPeerConnection(rtcConfig);
 
+    // Monitorear el estado de la conexión (connecting, connected, failed, disconnected)
+    peerConnection.onconnectionstatechange = () => {
+        console.log("[WebRTC] Estado de conexión de pares:", peerConnection.connectionState);
+        const stateSender = document.getElementById("peerStateSender");
+        if (stateSender && userRole === "sender") {
+            stateSender.innerText = peerConnection.connectionState;
+        }
+        if (userRole === "receiver") {
+            const statusText = document.getElementById("receiverStatusText");
+            if (peerConnection.connectionState === "connecting") {
+                statusText.innerText = "Estableciendo conexión en vivo (P2P / Relay TURN)...";
+            } else if (peerConnection.connectionState === "connected") {
+                document.getElementById("receiverOverlay").classList.add("hidden");
+            } else if (peerConnection.connectionState === "failed") {
+                statusText.innerText = "Reintentando conexión a través de servidor Relay TURN...";
+                try { peerConnection.restartIce(); } catch (e) {}
+            }
+        }
+    };
+
     // Candidatos ICE
     peerConnection.onicecandidate = (event) => {
         if (event.candidate && socket && socket.readyState === WebSocket.OPEN) {
@@ -249,6 +286,7 @@ function initPeerConnection() {
             }));
         }
     };
+
 
     // Si somos emisor, agregamos los tracks de video/audio
     if (userRole === "sender" && localStream) {
