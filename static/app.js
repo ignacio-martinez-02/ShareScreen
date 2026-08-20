@@ -7,8 +7,9 @@ let userRole = null; // 'sender' | 'receiver'
 let statsInterval = null;
 let heartbeatInterval = null;
 let pendingIceCandidates = [];
+let remoteControlInitialized = false;
 
-// Configuración ICE Server (Google STUN + Cloudflare + OpenRelay & Metered TURN)
+// Configuración ICE Server (Google STUN + Cloudflare + OpenRelay TURN)
 const rtcConfig = {
     iceServers: [
         { urls: "stun:stun.l.google.com:19302" },
@@ -18,7 +19,7 @@ const rtcConfig = {
         { urls: "stun:stun4.l.google.com:19302" },
         { urls: "stun:stun.cloudflare.com:3478" },
         { urls: "stun:global.stun.twilio.com:3478" },
-        // Servidores TURN (Relay) indispensables para atravesar routers distintos, Ethernet corp, CGNAT
+        // Servidores TURN (Relay) para atravesar routers distintos, Ethernet corp y CGNAT
         {
             urls: [
                 "turn:openrelay.metered.ca:80",
@@ -49,12 +50,13 @@ function focusRoomInput() {
 function updateConnectionStatus(status, text) {
     const badge = document.getElementById("connectionBadge");
     const textEl = document.getElementById("statusText");
-    textEl.innerText = text;
-    
-    badge.className = "badge " + (
-        status === "online" ? "badge-online" :
-        status === "connecting" ? "badge-info" : "badge-offline"
-    );
+    if (textEl) textEl.innerText = text;
+    if (badge) {
+        badge.className = "badge " + (
+            status === "online" ? "badge-online" :
+            status === "connecting" ? "badge-info" : "badge-offline"
+        );
+    }
 }
 
 function updateReceiverStatus(text) {
@@ -71,6 +73,7 @@ function resetToLobby() {
         heartbeatInterval = null;
     }
     if (socket) {
+        socket.onclose = null;
         socket.close();
         socket = null;
     }
@@ -90,6 +93,7 @@ function resetToLobby() {
     pendingIceCandidates = [];
     userRole = null;
     currentRoomCode = null;
+    remoteControlInitialized = false;
     document.getElementById("localVideo").srcObject = null;
     document.getElementById("remoteVideo").srcObject = null;
 
@@ -138,9 +142,10 @@ function setupReceiver() {
     connectWebSocket(currentRoomCode);
 }
 
-// --- CONEXIÓN DE SEÑALIZACIÓN (WEBSOCKETS DE PERSISTENCIA) ---
+// --- CONEXIÓN DE SEÑALIZACIÓN (WEBSOCKETS PERSISTENTE) ---
 function connectWebSocket(roomCode) {
     if (socket) {
+        socket.onclose = null;
         try { socket.close(); } catch(e){}
         socket = null;
     }
@@ -159,7 +164,7 @@ function connectWebSocket(roomCode) {
         console.log(`[WS] Conectado a la sala ${roomCode}`);
         updateConnectionStatus("online", "En Sala (" + roomCode + ")");
         
-        // Iniciar Heartbeat Ping cada 15 segundos para evitar que Render o proxies corten la conexión
+        // Heartbeat Ping cada 15 segundos para mantener viva la conexión en proxies/Render
         heartbeatInterval = setInterval(() => {
             if (socket && socket.readyState === WebSocket.OPEN) {
                 socket.send(jsonMsg({ type: "ping" }));
@@ -177,7 +182,7 @@ function connectWebSocket(roomCode) {
     socket.onmessage = async (event) => {
         try {
             const data = JSON.parse(event.data);
-            if (data.type === "pong") return; // Ignorar heartbeat
+            if (data.type === "pong") return; // Ignorar respuestas de heartbeat
             handleSignalingMessage(data);
         } catch (e) {
             console.error("[WS] Error parseando mensaje:", e);
@@ -209,7 +214,9 @@ async function handleSignalingMessage(data) {
             console.log("[WebRTC] El emisor ha iniciado compartición de pantalla!");
             if (userRole === "receiver") {
                 updateReceiverStatus("El emisor inició transmisión. Solicitando conexión...");
-                socket.send(jsonMsg({ type: "receiver-ready" }));
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    socket.send(jsonMsg({ type: "receiver-ready" }));
+                }
             }
             break;
 
@@ -241,7 +248,9 @@ async function handleSignalingMessage(data) {
                     offerToReceiveAudio: true
                 });
                 await peerConnection.setLocalDescription(answer);
-                socket.send(jsonMsg({ type: "answer", answer: answer }));
+                if (socket && socket.readyState === WebSocket.OPEN) {
+                    socket.send(jsonMsg({ type: "answer", answer: answer }));
+                }
             }
             break;
 
@@ -299,7 +308,7 @@ async function processPendingIceCandidates() {
     }
 }
 
-// Control dinámico de tasa de bits (Bitrate) para no saturar conexiones domésticas de subida
+// Control dinámico de tasa de bits (Bitrate)
 function applyBitrateOptimization() {
     if (!peerConnection || userRole !== "sender") return;
     const senders = peerConnection.getSenders();
@@ -308,7 +317,6 @@ function applyBitrateOptimization() {
         try {
             const parameters = videoSender.getParameters();
             if (!parameters.encodings) parameters.encodings = [{}];
-            // Limitar a 2.5 Mbps para fluidez garantizada por Internet/Wi-Fi
             parameters.encodings[0].maxBitrate = 2500000;
             videoSender.setParameters(parameters).catch(e => console.warn("[Bitrate] Set parameter error:", e));
             console.log("[Bitrate] Optimización aplicada: máximo 2.5 Mbps.");
@@ -364,20 +372,26 @@ function initPeerConnection() {
     // Si somos receptor, recibimos el stream remoto
     if (userRole === "receiver") {
         peerConnection.ontrack = (event) => {
-            console.log("[WebRTC] Track remoto recibido!", event);
+            console.log("[WebRTC] Track remoto recibido!", event.track.kind);
             const remoteVideo = document.getElementById("remoteVideo");
             
             let stream = (event.streams && event.streams[0]) ? event.streams[0] : null;
             if (!stream) {
-                stream = new MediaStream();
-                stream.addTrack(event.track);
+                if (!remoteVideo.srcObject) {
+                    remoteVideo.srcObject = new MediaStream();
+                }
+                remoteVideo.srcObject.addTrack(event.track);
+                stream = remoteVideo.srcObject;
             }
 
-            remoteVideo.srcObject = stream;
-            remoteVideo.onloadedmetadata = () => {
-                remoteVideo.play().catch(e => console.warn("[WebRTC] Play en metadata err:", e));
-            };
-            remoteVideo.play().catch(e => console.warn("[WebRTC] Play directo err:", e));
+            if (remoteVideo.srcObject !== stream) {
+                remoteVideo.srcObject = stream;
+            }
+
+            // Reproducir únicamente si la reproducción actual no ha iniciado
+            if (remoteVideo.paused) {
+                remoteVideo.play().catch(e => console.warn("[WebRTC] Play err:", e));
+            }
 
             document.getElementById("receiverOverlay").classList.add("hidden");
             setupRemoteControlListeners();
@@ -393,7 +407,9 @@ async function createAndSendOffer() {
         offerToReceiveAudio: true
     });
     await peerConnection.setLocalDescription(offer);
-    socket.send(jsonMsg({ type: "offer", offer: offer }));
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(jsonMsg({ type: "offer", offer: offer }));
+    }
 }
 
 // --- INICIAR / DETENER TRANSMISIÓN DE PANTALLA (EMISOR) ---
@@ -455,7 +471,6 @@ async function startScreenShare() {
             stopScreenShare();
         };
 
-        // Notificar a la sala que el emisor ya está compartiendo
         if (socket && socket.readyState === WebSocket.OPEN) {
             socket.send(jsonMsg({ type: "sender-ready" }));
 
@@ -540,13 +555,16 @@ function takeScreenshot() {
     a.click();
 }
 
-// --- ESCUCHADORES DE CONTROL REMOTO ---
+// --- ESCUCHADORES DE CONTROL REMOTO (CON VERIFICACIÓN DE WEBSOCKET ABIERTO) ---
 function setupRemoteControlListeners() {
+    if (remoteControlInitialized) return;
+    remoteControlInitialized = true;
+
     const container = document.getElementById("viewerContainer");
-    const video = document.getElementById("remoteVideo");
 
     container.addEventListener("click", (e) => {
-        if (userRole !== "receiver" || !socket) return;
+        if (userRole !== "receiver" || !socket || socket.readyState !== WebSocket.OPEN) return;
+        const video = document.getElementById("remoteVideo");
         const rect = video.getBoundingClientRect();
         const x = (e.clientX - rect.left) / rect.width;
         const y = (e.clientY - rect.top) / rect.height;
@@ -563,7 +581,8 @@ function setupRemoteControlListeners() {
     });
 
     container.addEventListener("mousemove", (e) => {
-        if (userRole !== "receiver" || !socket) return;
+        if (userRole !== "receiver" || !socket || socket.readyState !== WebSocket.OPEN) return;
+        const video = document.getElementById("remoteVideo");
         const rect = video.getBoundingClientRect();
         const x = (e.clientX - rect.left) / rect.width;
         const y = (e.clientY - rect.top) / rect.height;
@@ -579,7 +598,7 @@ function setupRemoteControlListeners() {
     });
 
     window.addEventListener("keydown", (e) => {
-        if (userRole !== "receiver" || !socket || document.activeElement.tagName === "INPUT") return;
+        if (userRole !== "receiver" || !socket || socket.readyState !== WebSocket.OPEN || document.activeElement.tagName === "INPUT") return;
         socket.send(jsonMsg({
             type: "remote-control",
             action: "keydown",
