@@ -7,7 +7,7 @@ let userRole = null; // 'sender' | 'receiver'
 let statsInterval = null;
 let pendingIceCandidates = [];
 
-// Configuración ICE Server (Google STUN + OpenRelay TURN para conectar distintas redes / CGNAT)
+// Configuración ICE Server (Google STUN + OpenRelay & Metered TURN)
 const rtcConfig = {
     iceServers: [
         { urls: "stun:stun.l.google.com:19302" },
@@ -16,7 +16,7 @@ const rtcConfig = {
         { urls: "stun:stun3.l.google.com:19302" },
         { urls: "stun:stun4.l.google.com:19302" },
         { urls: "stun:global.stun.twilio.com:3478" },
-        // Servidores TURN (Relay) indispensables para atravesar routers distintos, CGNAT y redes Wi-Fi diferentes
+        // Servidores TURN (Relay) indispensables para atravesar routers distintos, Ethernet corp, CGNAT
         {
             urls: "turn:openrelay.metered.ca:80",
             username: "openrelayproject",
@@ -35,13 +35,11 @@ const rtcConfig = {
     ]
 };
 
-
 // --- INICIALIZACIÓN AL CARGAR LA PÁGINA ---
 document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("serverIpText").innerText = window.location.hostname;
 });
 
-// --- LÓGICA DE SALA Y MODO ---
 function generateRoomCode() {
     return Math.floor(1000 + Math.random() * 9000).toString();
 }
@@ -59,6 +57,14 @@ function updateConnectionStatus(status, text) {
         status === "online" ? "badge-online" :
         status === "connecting" ? "badge-info" : "badge-offline"
     );
+}
+
+function updateReceiverStatus(text) {
+    const statusText = document.getElementById("receiverStatusText");
+    if (statusText) {
+        statusText.innerText = text;
+        console.log("[Receiver Status]", text);
+    }
 }
 
 function resetToLobby() {
@@ -125,6 +131,7 @@ function setupReceiver() {
 
     document.getElementById("lobbySection").classList.add("hidden");
     document.getElementById("receiverSection").classList.remove("hidden");
+    updateReceiverStatus("Conectando al servidor de salas...");
 
     connectWebSocket(currentRoomCode);
 }
@@ -142,6 +149,7 @@ function connectWebSocket(roomCode) {
         updateConnectionStatus("online", "En Sala (" + roomCode + ")");
         
         if (userRole === "receiver") {
+            updateReceiverStatus("Conectado a la sala. Solicitando transmisión al emisor...");
             socket.send(jsonMsg({ type: "receiver-ready" }));
         }
     };
@@ -172,8 +180,16 @@ function jsonMsg(obj) {
 // --- PROCESAMIENTO DE MENSAJES DE SEÑALIZACIÓN WEBRTC ---
 async function handleSignalingMessage(data) {
     switch (data.type) {
+        case "sender-ready":
+            console.log("[WebRTC] El emisor ha iniciado compartición de pantalla!");
+            if (userRole === "receiver") {
+                updateReceiverStatus("El emisor inició transmisión. Solicitando conexión...");
+                socket.send(jsonMsg({ type: "receiver-ready" }));
+            }
+            break;
+
         case "receiver-ready":
-            console.log("[WebRTC] Receptor listo. Reiniciando negociación de pares...");
+            console.log("[WebRTC] Receptor listo en la sala. Creando oferta WebRTC...");
             if (userRole === "sender" && localStream) {
                 if (peerConnection) {
                     peerConnection.close();
@@ -186,7 +202,8 @@ async function handleSignalingMessage(data) {
 
         case "offer":
             if (userRole === "receiver") {
-                console.log("[WebRTC] Oferta recibida. Creando respuesta...");
+                console.log("[WebRTC] Oferta recibida. Configurando descripción remota...");
+                updateReceiverStatus("Oferta de video recibida. Negociando conexión WebRTC...");
                 if (peerConnection) {
                     peerConnection.close();
                     peerConnection = null;
@@ -202,7 +219,7 @@ async function handleSignalingMessage(data) {
 
         case "answer":
             if (userRole === "sender" && peerConnection) {
-                console.log("[WebRTC] Respuesta recibida. Estableciendo conexión...");
+                console.log("[WebRTC] Respuesta del receptor recibida. Conexión establecida.");
                 await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
                 await processPendingIceCandidates();
                 document.getElementById("peerStateSender").innerText = "Conectado";
@@ -232,7 +249,7 @@ async function handleSignalingMessage(data) {
                 document.getElementById("peersCountSender").innerText = "0";
             } else {
                 document.getElementById("receiverOverlay").classList.remove("hidden");
-                document.getElementById("receiverStatusText").innerText = "El emisor se ha desconectado.";
+                updateReceiverStatus("El emisor se ha desconectado de la sala.");
             }
             break;
     }
@@ -257,21 +274,21 @@ function initPeerConnection() {
 
     peerConnection = new RTCPeerConnection(rtcConfig);
 
-    // Monitorear el estado de la conexión (connecting, connected, failed, disconnected)
+    // Monitorear el estado de la conexión
     peerConnection.onconnectionstatechange = () => {
-        console.log("[WebRTC] Estado de conexión de pares:", peerConnection.connectionState);
+        console.log("[WebRTC] ConnectionState:", peerConnection.connectionState);
         const stateSender = document.getElementById("peerStateSender");
         if (stateSender && userRole === "sender") {
             stateSender.innerText = peerConnection.connectionState;
         }
         if (userRole === "receiver") {
-            const statusText = document.getElementById("receiverStatusText");
             if (peerConnection.connectionState === "connecting") {
-                statusText.innerText = "Estableciendo conexión en vivo (P2P / Relay TURN)...";
+                updateReceiverStatus("Conectando flujo de video (P2P / Relay TURN)...");
             } else if (peerConnection.connectionState === "connected") {
+                updateReceiverStatus("¡Conectado! Cargando video...");
                 document.getElementById("receiverOverlay").classList.add("hidden");
             } else if (peerConnection.connectionState === "failed") {
-                statusText.innerText = "Reintentando conexión a través de servidor Relay TURN...";
+                updateReceiverStatus("Falló conexión P2P. Reintentando por servidor TURN...");
                 try { peerConnection.restartIce(); } catch (e) {}
             }
         }
@@ -287,7 +304,6 @@ function initPeerConnection() {
         }
     };
 
-
     // Si somos emisor, agregamos los tracks de video/audio
     if (userRole === "sender" && localStream) {
         localStream.getTracks().forEach(track => {
@@ -298,15 +314,24 @@ function initPeerConnection() {
     // Si somos receptor, recibimos el stream remoto
     if (userRole === "receiver") {
         peerConnection.ontrack = (event) => {
-            console.log("[WebRTC] Track remoto recibido!", event.streams);
+            console.log("[WebRTC] Track remoto recibido!", event);
             const remoteVideo = document.getElementById("remoteVideo");
-            if (event.streams && event.streams[0]) {
-                remoteVideo.srcObject = event.streams[0];
-                remoteVideo.play().catch(e => console.warn("[WebRTC] Reproducción bloqueada por política del navegador:", e));
-                document.getElementById("receiverOverlay").classList.add("hidden");
-                setupRemoteControlListeners();
-                startMetricsLoop();
+            
+            let stream = (event.streams && event.streams[0]) ? event.streams[0] : null;
+            if (!stream) {
+                stream = new MediaStream();
+                stream.addTrack(event.track);
             }
+
+            remoteVideo.srcObject = stream;
+            remoteVideo.onloadedmetadata = () => {
+                remoteVideo.play().catch(e => console.warn("[WebRTC] Play en metadata err:", e));
+            };
+            remoteVideo.play().catch(e => console.warn("[WebRTC] Play directo err:", e));
+
+            document.getElementById("receiverOverlay").classList.add("hidden");
+            setupRemoteControlListeners();
+            startMetricsLoop();
         };
     }
 }
@@ -344,13 +369,28 @@ async function startScreenShare() {
     }
 
     try {
-        localStream = await navigator.mediaDevices.getDisplayMedia({
-            video: {
-                ...videoConstraints,
-                cursor: "always"
-            },
-            audio: includeAudio
-        });
+        try {
+            localStream = await navigator.mediaDevices.getDisplayMedia({
+                video: {
+                    ...videoConstraints,
+                    cursor: "always"
+                },
+                audio: includeAudio
+            });
+        } catch (errWithAudio) {
+            if (includeAudio) {
+                console.warn("[Media] Captura con audio falló. Intentando solo video...", errWithAudio);
+                localStream = await navigator.mediaDevices.getDisplayMedia({
+                    video: {
+                        ...videoConstraints,
+                        cursor: "always"
+                    },
+                    audio: false
+                });
+            } else {
+                throw errWithAudio;
+            }
+        }
 
         document.getElementById("localVideo").srcObject = localStream;
         document.getElementById("noStreamOverlay").classList.add("hidden");
@@ -361,13 +401,14 @@ async function startScreenShare() {
         const settings = videoTrack.getSettings();
         document.getElementById("resSender").innerText = `${settings.width}x${settings.height} @ ${Math.round(settings.frameRate)} FPS`;
 
-        // Detener transmisión si el usuario cierra el popup del sistema
         videoTrack.onended = () => {
             stopScreenShare();
         };
 
-        // Re-crear conexión WebRTC limpia con los nuevos tracks
+        // Notificar a la sala que el emisor ya está compartiendo
         if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(jsonMsg({ type: "sender-ready" }));
+
             if (peerConnection) {
                 peerConnection.close();
                 peerConnection = null;
