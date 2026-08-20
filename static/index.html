@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ShareScreen LAN | Transmisión de Pantalla en Tiempo Real</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app-background"></div>
+
+    <div class="container">
+        <!-- HEADER DE LA APP -->
+        <header class="main-header">
+            <div class="logo">
+                <span class="logo-icon">📡</span>
+                <span class="logo-text">Share<span class="highlight">Screen</span> <small>LAN</small></span>
+            </div>
+            <div class="status-bar">
+                <span id="connectionBadge" class="badge badge-offline">
+                    <span class="dot"></span> <span id="statusText">Desconectado</span>
+                </span>
+                <span id="ipBadge" class="badge badge-info">
+                    🌐 LAN IP: <span id="serverIpText">Detectando...</span>
+                </span>
+            </div>
+        </header>
+
+        <!-- PANTALLA DE SELECCIÓN DE MODO Y CÓDIGO DE SALA -->
+        <main id="lobbySection" class="section active">
+            <div class="hero-text">
+                <h1>Transmisión Ultra Rápida en Red Local</h1>
+                <p>Comparte la pantalla entre cualquier dispositivo en la misma red (Wi-Fi ↔ Wi-Fi, Wi-Fi ↔ Ethernet) con bajísima latencia y máxima privacidad.</p>
+            </div>
+
+
+            <div class="mode-cards">
+                <!-- Tarjeta Emisor (Notebook / PC) -->
+                <div class="card card-hover" onclick="setupSender()">
+                    <div class="card-icon">💻</div>
+                    <h2>Transmitir Pantalla</h2>
+                    <p>Ideal para el equipo que comparte. Genera un código e inicia la transmisión de tu escritorio o ventana.</p>
+                    <button class="btn btn-primary" id="btnModeSender">
+                        <span>Iniciar como Emisor</span> ➔
+                    </button>
+                </div>
+
+                <!-- Tarjeta Receptor (Notebook / PC) -->
+                <div class="card card-hover" onclick="focusRoomInput()">
+                    <div class="card-icon">🖥️</div>
+                    <h2>Recibir Pantalla</h2>
+                    <p>Ideal para el equipo que recibe. Ingresa el código de 4 dígitos para ver la pantalla en vivo.</p>
+
+                    <div class="join-box" onclick="event.stopPropagation()">
+                        <input type="text" id="roomCodeInput" placeholder="Código (ej. 4821)" maxlength="4" autocomplete="off">
+                        <button class="btn btn-secondary" onclick="setupReceiver()">
+                            <span>Conectar</span> ➔
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- PANEL DEL EMISOR (NOTEBOOK) -->
+        <section id="senderSection" class="section hidden">
+            <div class="panel-header">
+                <h2>Panel del Emisor <span class="badge badge-primary">Notebook</span></h2>
+                <div class="room-display">
+                    <span>Código de Sala:</span>
+                    <strong id="senderRoomCode">----</strong>
+                    <button class="btn-icon" onclick="copyRoomCode()" title="Copiar código">📋</button>
+                </div>
+            </div>
+
+            <div class="sender-layout">
+                <div class="preview-box">
+                    <video id="localVideo" autoplay playsinline muted></video>
+                    <div id="noStreamOverlay" class="video-overlay">
+                        <div class="pulse-icon">🖥️</div>
+                        <p>Haz clic en "Iniciar Compartición" para seleccionar tu pantalla o ventana.</p>
+                    </div>
+                </div>
+
+                <div class="controls-card">
+                    <h3>Ajustes de Transmisión</h3>
+                    
+                    <div class="form-group">
+                        <label for="qualitySelect">Calidad & FPS:</label>
+                        <select id="qualitySelect">
+                            <option value="1080p60" selected>1080p @ 60 FPS (Ultra Fluido)</option>
+                            <option value="1080p30">1080p @ 30 FPS (Balanziado)</option>
+                            <option value="720p30">720p @ 30 FPS (Bajo Consumo)</option>
+                            <option value="4k30">4K Ultra HD @ 30 FPS</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group toggle-group">
+                        <label for="audioToggle">Incluir Audio del Sistema / Micrófono:</label>
+                        <input type="checkbox" id="audioToggle" checked>
+                    </div>
+
+                    <div class="form-group toggle-group">
+                        <label for="remoteControlToggle">Permitir Control Remoto (Mouse/Teclado):</label>
+                        <input type="checkbox" id="remoteControlToggle" checked>
+                    </div>
+
+                    <div class="action-buttons">
+                        <button id="btnStartShare" class="btn btn-success" onclick="startScreenShare()">
+                            ▶️ Iniciar Compartición
+                        </button>
+                        <button id="btnStopShare" class="btn btn-danger hidden" onclick="stopScreenShare()">
+                            ⏹️ Detener
+                        </button>
+                        <button class="btn btn-outline" onclick="resetToLobby()">
+                            ↩️ Volver al Inicio
+                        </button>
+                    </div>
+
+                    <div class="stats-card">
+                        <h4>Métricas en Vivo</h4>
+                        <div class="stat-item"><span>Estado WebRTC:</span> <strong id="peerStateSender">Desconectado</strong></div>
+                        <div class="stat-item"><span>Resolución:</span> <strong id="resSender">-</strong></div>
+                        <div class="stat-item"><span>Receptores Conectados:</span> <strong id="peersCountSender">0</strong></div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- PANEL DEL RECEPTOR (PC DESKTOP) -->
+        <section id="receiverSection" class="section hidden">
+            <div class="receiver-toolbar">
+                <div class="toolbar-left">
+                    <span class="badge badge-live">🔴 EN VIVO</span>
+                    <span class="room-tag">Sala: <strong id="receiverRoomCode">----</strong></span>
+                </div>
+
+                <div class="toolbar-center">
+                    <div class="metrics-overlay">
+                        <span>⚡ Latencia RTT: <strong id="latencyValue">-- ms</strong></span>
+                        <span>🎞️ FPS: <strong id="fpsValue">--</strong></span>
+                    </div>
+                </div>
+
+                <div class="toolbar-right">
+                    <button class="btn-tool" id="btnAudioMute" onclick="toggleRemoteAudio()" title="Activar/Silenciar Audio">🔊 Audio</button>
+                    <button class="btn-tool" onclick="takeScreenshot()" title="Capturar Pantalla">📷 Screenshot</button>
+                    <button class="btn-tool" onclick="toggleFullscreen()" title="Pantalla Completa">⛶ Pantalla Completa</button>
+                    <button class="btn-tool btn-danger-sm" onclick="resetToLobby()">✖ Desconectar</button>
+                </div>
+            </div>
+
+            <div class="viewer-container" id="viewerContainer">
+                <video id="remoteVideo" autoplay playsinline></video>
+                <div id="receiverOverlay" class="video-overlay">
+                    <div class="spinner"></div>
+                    <p id="receiverStatusText">Esperando la transmisión desde la notebook...</p>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
