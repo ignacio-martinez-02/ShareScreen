@@ -9,7 +9,7 @@ let heartbeatInterval = null;
 let pendingIceCandidates = [];
 let remoteControlInitialized = false;
 
-// Configuración ICE Server (Google STUN + Cloudflare + OpenRelay TURN)
+// Configuración ICE Server (Google STUN + Cloudflare + OpenRelay & ExpressTURN Relays)
 const rtcConfig = {
     iceServers: [
         { urls: "stun:stun.l.google.com:19302" },
@@ -19,7 +19,7 @@ const rtcConfig = {
         { urls: "stun:stun4.l.google.com:19302" },
         { urls: "stun:stun.cloudflare.com:3478" },
         { urls: "stun:global.stun.twilio.com:3478" },
-        // Servidores TURN (Relay) indispensables para atravesar routers distintos, Ethernet corp y CGNAT
+        // Servidores TURN Relay (OpenRelay + ExpressTURN)
         {
             urls: [
                 "turn:openrelay.metered.ca:80",
@@ -29,6 +29,14 @@ const rtcConfig = {
             ],
             username: "openrelayproject",
             credential: "openrelayproject"
+        },
+        {
+            urls: [
+                "turn:relay1.expressturn.com:3478",
+                "turn:relay2.expressturn.com:3478"
+            ],
+            username: "000000000216606",
+            credential: "free"
         }
     ],
     iceCandidatePoolSize: 10
@@ -37,6 +45,16 @@ const rtcConfig = {
 // --- INICIALIZACIÓN AL CARGAR LA PÁGINA ---
 document.addEventListener("DOMContentLoaded", () => {
     document.getElementById("serverIpText").innerText = window.location.hostname;
+    
+    // Al reproducirse el video en el receptor, ocultar el overlay de carga inmediatamente
+    const remoteVideo = document.getElementById("remoteVideo");
+    if (remoteVideo) {
+        remoteVideo.onplaying = () => {
+            console.log("[WebRTC] ¡Video reproduciéndose en pantalla!");
+            const overlay = document.getElementById("receiverOverlay");
+            if (overlay) overlay.classList.add("hidden");
+        };
+    }
 });
 
 function generateRoomCode() {
@@ -207,13 +225,12 @@ function jsonMsg(obj) {
     return JSON.stringify(obj);
 }
 
-// --- PROCESAMIENTO DE MENSAJES DE SEÑALIZACIÓN WEBRTC (CON CONTROL DE ESTADOS) ---
+// --- PROCESAMIENTO DE MENSAJES DE SEÑALIZACIÓN WEBRTC ---
 async function handleSignalingMessage(data) {
     switch (data.type) {
         case "sender-ready":
             console.log("[WebRTC] El emisor ha iniciado compartición de pantalla!");
             if (userRole === "receiver") {
-                // Solo enviar receiver-ready si no tenemos ya una conexión WebRTC activa
                 if (!peerConnection || peerConnection.connectionState === "failed" || peerConnection.connectionState === "disconnected") {
                     updateReceiverStatus("El emisor inició transmisión. Solicitando conexión...");
                     if (socket && socket.readyState === WebSocket.OPEN) {
@@ -226,7 +243,6 @@ async function handleSignalingMessage(data) {
         case "receiver-ready":
             console.log("[WebRTC] Receptor listo en la sala. Evaluando oferta WebRTC...");
             if (userRole === "sender" && localStream) {
-                // Si ya estamos conectados o en negociación activa, evitar reiniciar innecesariamente
                 if (peerConnection && (peerConnection.connectionState === "connected" || peerConnection.signalingState === "have-local-offer")) {
                     console.log("[WebRTC] Conexión ya en proceso o conectada. Omitiendo duplicado de oferta.");
                     return;
@@ -269,7 +285,6 @@ async function handleSignalingMessage(data) {
 
         case "answer":
             if (userRole === "sender" && peerConnection) {
-                // Solo aplicar la respuesta si estamos esperando una respuesta local (have-local-offer)
                 if (peerConnection.signalingState === "have-local-offer") {
                     console.log("[WebRTC] Respuesta del receptor recibida. Conexión establecida.");
                     try {
@@ -366,7 +381,8 @@ function initPeerConnection() {
                 updateReceiverStatus("Conectando flujo de video (P2P / Relay TURN)...");
             } else if (peerConnection.connectionState === "connected") {
                 updateReceiverStatus("¡Conectado! Cargando video...");
-                document.getElementById("receiverOverlay").classList.add("hidden");
+                const overlay = document.getElementById("receiverOverlay");
+                if (overlay) overlay.classList.add("hidden");
             } else if (peerConnection.connectionState === "failed") {
                 updateReceiverStatus("Falló conexión P2P. Reintentando por servidor TURN...");
                 try { peerConnection.restartIce(); } catch (e) {}
@@ -410,11 +426,20 @@ function initPeerConnection() {
                 remoteVideo.srcObject = stream;
             }
 
-            if (remoteVideo.paused) {
-                remoteVideo.play().catch(e => console.warn("[WebRTC] Play err:", e));
-            }
+            // Reproducción automática de video
+            remoteVideo.play().then(() => {
+                const overlay = document.getElementById("receiverOverlay");
+                if (overlay) overlay.classList.add("hidden");
+            }).catch(e => {
+                console.warn("[WebRTC] Autoplay bloqueado o err:", e);
+                // Si el navegador bloqueó el autoplay con audio, silenciar y reintentar
+                remoteVideo.muted = true;
+                remoteVideo.play().then(() => {
+                    const overlay = document.getElementById("receiverOverlay");
+                    if (overlay) overlay.classList.add("hidden");
+                }).catch(err2 => console.error("[WebRTC] Falló autoplay aun silenciado:", err2));
+            });
 
-            document.getElementById("receiverOverlay").classList.add("hidden");
             setupRemoteControlListeners();
             startMetricsLoop();
         };
@@ -580,7 +605,7 @@ function takeScreenshot() {
     a.click();
 }
 
-// --- ESCUCHADORES DE CONTROL REMOTO (CON VERIFICACIÓN DE WEBSOCKET ABIERTO) ---
+// --- ESCUCHADORES DE CONTROL REMOTO ---
 function setupRemoteControlListeners() {
     if (remoteControlInitialized) return;
     remoteControlInitialized = true;
