@@ -5,6 +5,7 @@ let localStream = null;
 let currentRoomCode = null;
 let userRole = null; // 'sender' | 'receiver'
 let statsInterval = null;
+let heartbeatInterval = null;
 let pendingIceCandidates = [];
 
 // Configuración ICE Server (Google STUN + OpenRelay & Metered TURN)
@@ -68,6 +69,10 @@ function updateReceiverStatus(text) {
 }
 
 function resetToLobby() {
+    if (heartbeatInterval) {
+        clearInterval(heartbeatInterval);
+        heartbeatInterval = null;
+    }
     if (socket) {
         socket.close();
         socket = null;
@@ -136,8 +141,17 @@ function setupReceiver() {
     connectWebSocket(currentRoomCode);
 }
 
-// --- CONEXIÓN DE SEÑALIZACIÓN (WEBSOCKETS) ---
+// --- CONEXIÓN DE SEÑALIZACIÓN (WEBSOCKETS DE PERSISTENCIA) ---
 function connectWebSocket(roomCode) {
+    if (socket) {
+        try { socket.close(); } catch(e){}
+        socket = null;
+    }
+    if (heartbeatInterval) {
+        clearInterval(heartbeatInterval);
+        heartbeatInterval = null;
+    }
+
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}/ws/${roomCode}`;
     
@@ -148,15 +162,25 @@ function connectWebSocket(roomCode) {
         console.log(`[WS] Conectado a la sala ${roomCode}`);
         updateConnectionStatus("online", "En Sala (" + roomCode + ")");
         
+        // Iniciar Heartbeat Ping cada 15 segundos para evitar que Render o proxies corten la conexión
+        heartbeatInterval = setInterval(() => {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send(jsonMsg({ type: "ping" }));
+            }
+        }, 15000);
+
         if (userRole === "receiver") {
             updateReceiverStatus("Conectado a la sala. Solicitando transmisión al emisor...");
             socket.send(jsonMsg({ type: "receiver-ready" }));
+        } else if (userRole === "sender" && localStream) {
+            socket.send(jsonMsg({ type: "sender-ready" }));
         }
     };
 
     socket.onmessage = async (event) => {
         try {
             const data = JSON.parse(event.data);
+            if (data.type === "pong") return; // Ignorar heartbeat
             handleSignalingMessage(data);
         } catch (e) {
             console.error("[WS] Error parseando mensaje:", e);
@@ -165,11 +189,15 @@ function connectWebSocket(roomCode) {
 
     socket.onclose = () => {
         console.warn("[WS] Desconectado del servidor.");
+        if (heartbeatInterval) {
+            clearInterval(heartbeatInterval);
+            heartbeatInterval = null;
+        }
         updateConnectionStatus("offline", "Desconectado");
     };
 
     socket.onerror = (err) => {
-        console.error("[WS] Error:", err);
+        console.error("[WS] Error de socket:", err);
     };
 }
 
@@ -243,13 +271,16 @@ async function handleSignalingMessage(data) {
             break;
 
         case "peer-left":
-            console.warn("[WebRTC] El par se ha desconectado.");
+            console.warn("[WebRTC] Notificación de par desconectado.");
             if (userRole === "sender") {
                 document.getElementById("peerStateSender").innerText = "Esperando receptor...";
                 document.getElementById("peersCountSender").innerText = "0";
-            } else {
-                document.getElementById("receiverOverlay").classList.remove("hidden");
-                updateReceiverStatus("El emisor se ha desconectado de la sala.");
+            } else if (userRole === "receiver") {
+                // Verificar si la conexión WebRTC sigue activa antes de mostrar desconexión
+                if (!peerConnection || peerConnection.connectionState !== "connected") {
+                    document.getElementById("receiverOverlay").classList.remove("hidden");
+                    updateReceiverStatus("El emisor se ha desconectado de la sala.");
+                }
             }
             break;
     }

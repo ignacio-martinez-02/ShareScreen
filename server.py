@@ -72,11 +72,15 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
                 msg = json.loads(data)
                 msg_type = msg.get("type")
 
+                # Heartbeat Ping-Pong para mantener viva la conexión WebSocket en Render / Proxies
+                if msg_type == "ping":
+                    await websocket.send_text(json.dumps({"type": "pong"}))
+                    continue
+
                 # Manejo opcional de control remoto (mouse/teclado) si pyautogui está disponible
                 if msg_type == "remote-control" and pyautogui:
                     action = msg.get("action")
                     if action == "mousemove":
-                        # Coordenadas relativas en porcentaje (0.0 a 1.0)
                         rx, ry = msg.get("x", 0), msg.get("y", 0)
                         screen_w, screen_h = pyautogui.size()
                         pyautogui.moveTo(int(rx * screen_w), int(ry * screen_h))
@@ -98,6 +102,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: str):
 
             except json.JSONDecodeError:
                 await manager.broadcast_to_room(data, websocket, room_id)
+
 
     except WebSocketDisconnect:
         manager.disconnect(websocket, room_id)
